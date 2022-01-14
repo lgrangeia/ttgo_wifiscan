@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "*.bask": "cpp",
+        "*.bak": "cpp"
+    }
+}
