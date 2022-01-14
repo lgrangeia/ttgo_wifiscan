@@ -6,3 +6,5 @@ by @lgrangeia
 Very simple wifi monitor for TTGo T-Display. This code has been mostly stolen from other examples.
 
 Button up/down changes Wifi channel, long press button down enters sleep mode
+
+Thank you @kripthor for the hardware, this is great stuff :)
