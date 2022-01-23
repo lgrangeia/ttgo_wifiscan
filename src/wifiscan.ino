@@ -31,6 +31,26 @@ using namespace std;
 #include <TFT_eSPI.h> // Hardware-specific library
 #include <SPI.h>
 
+
+// colors for signals from multiple stations
+static const uint16_t STA_COLORS[] = {
+    TFT_BROWN,
+    TFT_RED,
+    TFT_ORANGE,
+    TFT_YELLOW,
+    TFT_GREEN,
+    TFT_BLUE,
+    TFT_PURPLE,
+    TFT_CYAN,
+    TFT_MAGENTA,
+    TFT_MAROON,
+    TFT_DARKGREEN,
+    TFT_NAVY,
+    TFT_PINK
+};
+
+uint16_t sta_color = TFT_YELLOW;
+
 TFT_eSPI tft = TFT_eSPI();;       // Invoke custom library
 TFT_eSprite rssi_graph = TFT_eSprite(&tft);
 int grid = 0;
@@ -47,21 +67,63 @@ uint32_t lastDrawTime;
 Button2 button_up;
 Button2 button_down;
 
+typedef struct {
+	int16_t fctl; //frame control
+	int16_t duration; //duration id
+	uint8_t da[6]; //receiver address
+	uint8_t sa[6]; //sender address
+	uint8_t bssid[6]; //filtering address
+	int16_t seqctl; //sequence control
+	unsigned char payload[]; //network data
+} __attribute__((packed)) wifi_mgmt_hdr;
+
+
+#define PKTDATASLEN 16
+struct pkt_data
+{
+    u_char used;
+    uint8_t sender_mac[6];
+    uint16_t tft_color;
+    int rssi;
+};
+
+struct pkt_data pkt_datas[PKTDATASLEN];
+struct pkt_data last_pkt;
 
 uint32_t tmpPacketCounter;
 uint32_t pkts[MAX_X];   // here the packets per second will be saved
 uint32_t deauths = 0;   // deauth frames per second
 unsigned int ch = 1;    // current 802.11 channel
-int rssiSum;
-int rssi = 0;
 
-double getMultiplicator() {
-    uint32_t maxVal = 1;
-    for (int i = 0; i < MAX_X; i++) {
-        if (pkts[i] > maxVal) maxVal = pkts[i];
+void clear_pkt_datas(){
+    for (int i=0; i < PKTDATASLEN; i++) {
+        pkt_datas[i].used = 0;
     }
-    if (maxVal > MAX_Y) return (double)MAX_Y / (double)maxVal;
-    else return 1;
+}
+
+void push_pkt_data(uint8_t *mac, int rssi) {
+    int i = 0;
+    while (pkt_datas[i].used != 0 && i < PKTDATASLEN-1) {
+        i++;
+    }
+    pkt_datas[i].used = 1;
+    memcpy(pkt_datas[i].sender_mac, mac, 6);
+    pkt_datas[i].rssi = rssi;
+    pkt_datas[i].tft_color = STA_COLORS[(pkt_datas[i].sender_mac[3] + pkt_datas[i].sender_mac[4] + pkt_datas[i].sender_mac[5]) % 13];
+}
+
+int pop_pkt_data() {
+    int i = 0;
+    while (pkt_datas[i].used == 0 && i < PKTDATASLEN-1) {
+        i++;
+    }
+    if (pkt_datas[i].used) {
+        memcpy(&last_pkt, &pkt_datas[i], sizeof(struct pkt_data));
+        pkt_datas[i].used = 0;
+        return 1;
+    } else {
+        return 0;
+    }
 }
 
 void setChannel(int newChannel) {
@@ -73,12 +135,14 @@ void setChannel(int newChannel) {
     preferences.end();
     esp_wifi_set_promiscuous(false);
     esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
-    esp_wifi_set_promiscuous_rx_cb(&wifi_promiscuous);
+    esp_wifi_set_promiscuous_rx_cb(&wifi_sniffer_handler);
     esp_wifi_set_promiscuous(true);
 }
 
-void wifi_promiscuous(void* buf, wifi_promiscuous_pkt_type_t type) {
+void wifi_sniffer_handler(void* buf, wifi_promiscuous_pkt_type_t type) {
     wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+    wifi_mgmt_hdr *mgmt = (wifi_mgmt_hdr *)pkt->payload;
+
     wifi_pkt_rx_ctrl_t ctrl = (wifi_pkt_rx_ctrl_t)pkt->rx_ctrl;
     if (type == WIFI_PKT_MGMT && 
         (pkt->payload[0] == 0xA0 || pkt->payload[0] == 0xC0 )) 
@@ -89,14 +153,8 @@ void wifi_promiscuous(void* buf, wifi_promiscuous_pkt_type_t type) {
     if (type == WIFI_PKT_MGMT) 
         packetLength -= 4;  // fix for known bug in the IDF https://github.com/espressif/esp-idf/issues/886
     tmpPacketCounter++;
-    rssiSum += ctrl.rssi;
-}
 
-void calculate_rssi() {
-    // This is still a mistery, I stole this from someone.
-    // double multiplicator = getMultiplicator();
-    if (pkts[MAX_X - 1] > 0) rssi = rssiSum / (int)pkts[MAX_X - 1];
-    else rssi = rssiSum;
+    push_pkt_data(mgmt->sa, ctrl.rssi);
 }
 
 void printAt(String s, int x, int y) {
@@ -124,6 +182,9 @@ void setup() {
     // System & WiFi
     nvs_flash_init();
     tcpip_adapter_init();
+
+    clear_pkt_datas();
+
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_event_loop_init(event_handler, NULL));
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
@@ -143,7 +204,7 @@ void setup() {
         1);                     /* Core where the task should run */
 
     // start Wifi sniffer
-    esp_wifi_set_promiscuous_rx_cb(&wifi_promiscuous);
+    esp_wifi_set_promiscuous_rx_cb(&wifi_sniffer_handler);
     esp_wifi_set_promiscuous(true);
     
     // Init buttons
@@ -153,7 +214,11 @@ void setup() {
 
 void draw_scroll_graph() {
     // Draw point in graph1 sprite at far right edge (this will scroll left later)
-    rssi_graph.drawFastVLine(239, MAX_Y+rssi, 2, TFT_YELLOW); // draw 2 pixel point on graph
+    for (int i=0; i < PKTDATASLEN; i++) {
+        if (pkt_datas[i].used) {
+            rssi_graph.drawFastVLine(239, MAX_Y+pkt_datas[i].rssi, 4, pkt_datas[i].tft_color);
+        }
+    }
 
     // Push the sprites onto the TFT at specied coordinates
     rssi_graph.pushSprite(0, 0);
@@ -217,10 +282,25 @@ void button_handler(Button2& btn) {
 }
 
 
+void show_pkt_infos() {
+    while(pop_pkt_data()) {
+        Serial.printf("ADDR=%02x:%02x:%02x:%02x:%02x:%02x, RSSI=%i\n",
+            last_pkt.sender_mac[0],
+            last_pkt.sender_mac[1],
+            last_pkt.sender_mac[2],
+            last_pkt.sender_mac[3],
+            last_pkt.sender_mac[4],
+            last_pkt.sender_mac[5],
+            last_pkt.rssi);
+    }
+}
+
+
 void loop() {
     delay(50);
     draw_scroll_graph();
     draw_legend();
+    show_pkt_infos();
 }
 
 
@@ -240,11 +320,8 @@ void core_task1( void * p ) {
         if ( currentTime - lastDrawTime > 100 ) {
             lastDrawTime = currentTime;
             pkts[MAX_X - 1] = tmpPacketCounter;
-            calculate_rssi();
-            Serial.printf("rssi: %i\n", rssi);
             tmpPacketCounter = 0;
             deauths = 0;
-            rssiSum = 0;
         }
         // Serial input
         if (Serial.available()) {
