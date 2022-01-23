@@ -1,7 +1,7 @@
 ESP32 Wifi Monitor for TTGo T-Display v0.0
 by @lgrangeia
 
-![TTGO T-Display Wifi Monitor](images/ttgo_wifiscan.png)
+![TTGO T-Display Wifi Monitor](images/ttgo_wifiscan.jpg)
 
 Very simple wifi monitor for TTGo T-Display. This code has been mostly stolen from other examples.
 
